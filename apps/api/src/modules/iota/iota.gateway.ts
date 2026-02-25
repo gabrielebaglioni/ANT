@@ -185,6 +185,32 @@ export class IotaGateway {
     });
   }
 
+  async handoverInFinalDelivery(input: {
+    moveObjectId: string;
+    shipmentCode: string;
+    payloadHash: string;
+    notarizationObjectId: string;
+  }): Promise<MoveTxResult> {
+    if (this.cfg.txRelayUrl) {
+      const result = await this.callRelay(this.cfg.txRelayUrl, "handoverInFinalDelivery", input);
+      return { txDigest: (result.txDigest as string | undefined) ?? null };
+    }
+    if (this.canUseSdk()) {
+      const result = await this.callMoveEntry("handover_in_confirm_and_mark_delivered", {
+        shipmentObjectId: input.moveObjectId,
+        shipmentCode: input.shipmentCode,
+        payloadHash: input.payloadHash,
+        notarizationObjectId: input.notarizationObjectId,
+      });
+      return { txDigest: (result.txDigest as string | undefined) ?? null };
+    }
+    return this.stubIfAllowed<MoveTxResult>({
+      txDigest: createHash("sha256")
+        .update(`handoverInFinalDelivery:${input.moveObjectId}:${Date.now()}`)
+        .digest("hex"),
+    });
+  }
+
   async getShipmentSnapshot(moveObjectId: string): Promise<ChainShipmentSnapshot | null> {
     if (!moveObjectId) return null;
     if (this.cfg.txRelayUrl) {
@@ -286,7 +312,12 @@ export class IotaGateway {
   }
 
   private async callMoveEntry(
-    functionName: "new_shipment_and_share" | "handover_out" | "handover_in_confirm",
+    functionName:
+      | "new_shipment_and_share"
+      | "handover_out"
+      | "handover_in_confirm"
+      | "mark_delivered"
+      | "handover_in_confirm_and_mark_delivered",
     params: {
       shipmentObjectId?: string;
       shipmentCode?: string;
@@ -385,6 +416,47 @@ export class IotaGateway {
           this.txPure(tx, utf8Bytes(params.notarizationObjectId ?? ""), "vector<u8>"),
           this.txPure(tx, nowMs, "u64"),
         ]);
+    } else if (functionName === "mark_delivered") {
+      tx.moveCall?.({
+        target: `${targetBase}::mark_delivered`,
+        arguments: [
+          tx.object?.(params.shipmentObjectId),
+          this.txPure(tx, sha256Bytes(params.payloadHash ?? ""), "vector<u8>"),
+          this.txPure(tx, utf8Bytes(params.notarizationObjectId ?? ""), "vector<u8>"),
+          this.txPure(tx, nowMs, "u64"),
+        ],
+      }) ??
+        tx.moveCall?.(`${targetBase}::mark_delivered`, [], [
+          tx.object?.(params.shipmentObjectId),
+          this.txPure(tx, sha256Bytes(params.payloadHash ?? ""), "vector<u8>"),
+          this.txPure(tx, utf8Bytes(params.notarizationObjectId ?? ""), "vector<u8>"),
+          this.txPure(tx, nowMs, "u64"),
+        ]);
+    } else if (functionName === "handover_in_confirm_and_mark_delivered") {
+      // Final receiver terminal step: close pending custody and mark shipment delivered in one tx.
+      const inArgs = [
+        tx.object?.(params.shipmentObjectId),
+        this.txPure(tx, sha256Bytes(params.payloadHash ?? ""), "vector<u8>"),
+        this.txPure(tx, utf8Bytes(params.notarizationObjectId ?? ""), "vector<u8>"),
+        this.txPure(tx, nowMs, "u64"),
+      ];
+      tx.moveCall?.({
+        target: `${targetBase}::handover_in_confirm`,
+        arguments: inArgs,
+      }) ??
+        tx.moveCall?.(`${targetBase}::handover_in_confirm`, [], inArgs);
+
+      const deliveredArgs = [
+        tx.object?.(params.shipmentObjectId),
+        this.txPure(tx, sha256Bytes(params.payloadHash ?? ""), "vector<u8>"),
+        this.txPure(tx, utf8Bytes(params.notarizationObjectId ?? ""), "vector<u8>"),
+        this.txPure(tx, nowMs, "u64"),
+      ];
+      tx.moveCall?.({
+        target: `${targetBase}::mark_delivered`,
+        arguments: deliveredArgs,
+      }) ??
+        tx.moveCall?.(`${targetBase}::mark_delivered`, [], deliveredArgs);
     }
 
     const signer = this.createKeypairFromSecret(keypairCtor, secret);

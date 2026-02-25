@@ -728,26 +728,10 @@ export function ScanSignPage() {
                   </div>
                 </div>
 
-                <div className="actions">
-                  <button
-                    type="button"
-                    className="btn primary"
-                    disabled={busy}
-                    onClick={() => void loadState(state.shipmentCode, { preserveSuccess: true, keepPickupLock: true })}
-                  >
-                    {busy ? "Aggiornamento..." : "Aggiorna stato finale"}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn"
-                    onClick={() => {
-                      setSharedShipmentCodeInput(state.shipmentCode);
-                      syncShipmentCodeEverywhere(state.shipmentCode);
-                    }}
-                  >
-                    Mantieni codice per Verify
-                  </button>
-                </div>
+                <p className="field-hint" style={{ marginTop: 2 }}>
+                  Il codice shipment resta condiviso tra tab: vai su <strong>Verify</strong> per scaricare il QR finale,
+                  stampare l&apos;etichetta e consultare timeline/foto/evidenze.
+                </p>
               </div>
             ) : (
             <div className="form-grid">

@@ -228,14 +228,21 @@ export class OutboxWorker {
     }
 
     if (handover === "IN") {
-      const tx = await this.iotaGateway.handoverInConfirm({
-        moveObjectId: shipment.moveObjectId ?? "",
-        shipmentCode: shipment.shipmentCode,
-        payloadHash: event.payloadHash,
-        notarizationObjectId: proof.notarizationObjectId,
-      });
       const isFinalReceiverTakeover =
         Boolean(actorDid) && actorDid === shipment.receiverDid;
+      const tx = isFinalReceiverTakeover
+        ? await this.iotaGateway.handoverInFinalDelivery({
+            moveObjectId: shipment.moveObjectId ?? "",
+            shipmentCode: shipment.shipmentCode,
+            payloadHash: event.payloadHash,
+            notarizationObjectId: proof.notarizationObjectId,
+          })
+        : await this.iotaGateway.handoverInConfirm({
+            moveObjectId: shipment.moveObjectId ?? "",
+            shipmentCode: shipment.shipmentCode,
+            payloadHash: event.payloadHash,
+            notarizationObjectId: proof.notarizationObjectId,
+          });
       const nowIso = new Date().toISOString();
       await this.store.updateEventProcessing(event.id, {
         processingStage: "MOVE_UPDATED",
@@ -257,7 +264,7 @@ export class OutboxWorker {
         actorType: "SYSTEM",
         actorId: "outbox.move_update",
         action: isFinalReceiverTakeover
-          ? "MOVE_HANDOVER_IN_CONFIRMED_FINAL_DELIVERY"
+          ? "MOVE_HANDOVER_IN_FINAL_DELIVERY_CONFIRMED"
           : "MOVE_HANDOVER_IN_CONFIRMED",
         shipmentId: shipment.id,
         epcisEventId: event.id,

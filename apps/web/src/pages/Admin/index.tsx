@@ -64,6 +64,58 @@ export function AdminPage() {
     },
   ] as const;
 
+  const writePipelineSteps = [
+    {
+      code: "EVENT_CAPTURED",
+      title: "Capture EPCIS (DB)",
+      text:
+        "L'evento EPCIS viene validato (schema + regole) e salvato off-chain con payload hash deterministico.",
+      check: "epcis_events + payload_hash + audit log",
+    },
+    {
+      code: "NOTARIZATION_CONFIRMED",
+      title: "Notarization IOTA",
+      text:
+        "Il worker outbox ancora il payload hash su IOTA (proof) e salva riferimento notarization/tx digest.",
+      check: "proofs + proof verify status",
+    },
+    {
+      code: "MOVE_UPDATED",
+      title: "Move custody update",
+      text:
+        "Il worker aggiorna lo stato di custodia on-chain (handover OUT / IN) usando hash + notarization come prova del passaggio.",
+      check: "move tx digest + stato shipment/custodia",
+    },
+    {
+      code: "FINALIZED",
+      title: "Finalize + reconciliation",
+      text:
+        "ANT marca l'evento come finalizzato e la reconciliation confronta DB/proof/chain snapshot per bloccare incoerenze.",
+      check: "processingStage FINALIZED + reconciliation status",
+    },
+  ] as const;
+
+  const operationalFlow = [
+    {
+      actor: "Producer",
+      action: "Create shipment",
+      expected:
+        "Shipment creata, QR valido, stato operativo dopo provisioning. Workspace producer = in attesa di ritiro.",
+    },
+    {
+      actor: "Carrier / Warehouse",
+      action: "Scan + Conferma presa in carico",
+      expected:
+        "ANT chiude il passaggio precedente, registra IN/OUT, aggiorna proof + Move e sposta la custody al nuovo attore.",
+    },
+    {
+      actor: "Final Receiver",
+      action: "Scan + Conferma finale",
+      expected:
+        "Shipment chiusa in DELIVERED. Niente ulteriori handover: solo Verify, QR finale, etichetta e documentazione.",
+    },
+  ] as const;
+
   const [opsMetrics, setOpsMetrics] = useState<OpsMetricsResponse | null>(null);
   const [opsLoading, setOpsLoading] = useState(false);
   const [opsError, setOpsError] = useState("");
@@ -277,6 +329,63 @@ export function AdminPage() {
                 {actionResult.status ?? "—"}
               </p>
             )}
+          </div>
+        </div>
+      </div>
+
+      <div className="panel-grid two">
+        <div className="card">
+          <h3>Pipeline scritture ANT (DB + IOTA + Move)</h3>
+          <p className="field-hint">
+            Vista di controllo: ogni passaggio operativo deve attraversare questi step in ordine.
+          </p>
+          <div className="admin-bottleneck-library">
+            {writePipelineSteps.map((step) => (
+              <div key={step.code} className="admin-bottleneck-card">
+                <div className="admin-bottleneck-card-head">
+                  <strong>{step.title}</strong>
+                  <span className="code-pill">{step.code}</span>
+                </div>
+                <p className="muted">{step.text}</p>
+                <p className="field-hint" style={{ marginTop: 8 }}>
+                  Verifica: <strong>{step.check}</strong>
+                </p>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="card">
+          <h3>Flusso operativo atteso (controllo logico)</h3>
+          <p className="field-hint">
+            Questo è il comportamento target della filiera ANT lato prodotto. Se UI/API fanno altro,
+            è un bug da correggere, non una compensazione manuale.
+          </p>
+          <div className="admin-bottleneck-library">
+            {operationalFlow.map((row) => (
+              <div key={`${row.actor}-${row.action}`} className="admin-bottleneck-card">
+                <div className="admin-bottleneck-card-head">
+                  <strong>{row.actor}</strong>
+                  <span className="code-pill">{row.action}</span>
+                </div>
+                <p className="muted">{row.expected}</p>
+              </div>
+            ))}
+          </div>
+          <div className="status-panel muted" style={{ marginTop: 10 }}>
+            <strong>Controlli di coerenza da usare in diagnosi</strong>
+            <p style={{ marginBottom: 6 }}>
+              1) <code>shipments/:code/state</code> (status/custody/expected next)
+            </p>
+            <p style={{ marginBottom: 6 }}>
+              2) <code>shipments/:code/timeline</code> (EPCIS events + processingStage)
+            </p>
+            <p style={{ marginBottom: 6 }}>
+              3) <code>verify/:code</code> (proof/notarization summary)
+            </p>
+            <p style={{ margin: 0 }}>
+              4) <code>ops/metrics</code> (outbox lag, reconciliation alerts, blocked shipments)
+            </p>
           </div>
         </div>
       </div>

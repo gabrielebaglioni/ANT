@@ -9,6 +9,7 @@ import {
   type ShipmentStateReadModel,
   type ShipmentWorkspaceList,
 } from "@ant/shared";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { Inject, Injectable } from "@nestjs/common";
 import { AppError } from "../../lib/errors";
@@ -417,7 +418,7 @@ export class ShipmentsService {
     const issue = ReportShipmentIssueSchema.parse(body);
     await this.attachmentsService.assertStagedAttachmentsExist(issue.attachments, tenantId);
 
-    const issueId = `ISS-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+    const issueId = `ISS-${randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`;
     // Shipping continues for small/medium issues; block only for severe/critical incidents.
     const shouldBlock = issue.severity === "HIGH" || issue.severity === "CRITICAL";
 
@@ -578,14 +579,25 @@ export class ShipmentsService {
 
     const sealRequired = Boolean((shipment.conditions ?? {}).sealRequired);
     if (sealRequired && lastEvent) {
-      const ant = (((lastEvent.payload.extensions ?? {}) as Record<string, unknown>).ant ??
+      const latestSealCheckEvent = [...events]
+        .reverse()
+        .find((evt) => {
+          const ant = (((evt.payload.extensions ?? {}) as Record<string, unknown>).ant ??
+            {}) as Record<string, unknown>;
+          const handover = ant.handover;
+          const finalDelivery = ant.finalDelivery === true;
+          // Final receiver terminal IN should not require new attachments in Scan.
+          if (finalDelivery) return false;
+          return handover === "OUT" || handover === "IN";
+        }) ?? lastEvent;
+      const ant = (((latestSealCheckEvent.payload.extensions ?? {}) as Record<string, unknown>).ant ??
         {}) as Record<string, unknown>;
       const attachments = Array.isArray(ant.attachments) ? ant.attachments : [];
       if (attachments.length === 0) {
         return BottleneckResultSchema.parse({
           type: "CONDITION_VIOLATION",
-          message: "Seal proof attachment is required but missing on latest event.",
-          since: lastEvent.eventTime,
+          message: "Seal proof attachment is required but missing on the latest relevant custody event.",
+          since: latestSealCheckEvent.eventTime,
           suggestedAction: "Request seal photo",
         });
       }

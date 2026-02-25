@@ -148,16 +148,17 @@ export class ReconciliationWorker implements OnModuleInit, OnModuleDestroy {
       }
     }
     if (chainSnapshot?.seq !== null && chainSnapshot?.seq !== undefined) {
-      const expectedSeq = events.filter((e) => {
+      const expectedSeq = events.reduce((acc, e) => {
         const ant = ((e.payload.extensions ?? {}) as Record<string, unknown>).ant as
           | Record<string, unknown>
           | undefined;
         const handover = ant?.handover;
-        return (
-          (handover === "OUT" || handover === "IN") &&
-          e.processingStage === "FINALIZED"
-        );
-      }).length;
+        const finalDelivery = ant?.finalDelivery === true;
+        if (e.processingStage !== "FINALIZED") return acc;
+        if (handover === "OUT") return acc + 1;
+        if (handover === "IN") return acc + (finalDelivery ? 2 : 1);
+        return acc;
+      }, 0);
       if (chainSnapshot.seq !== expectedSeq) {
         mismatches.seq = { chain: chainSnapshot.seq, db: expectedSeq };
       }
