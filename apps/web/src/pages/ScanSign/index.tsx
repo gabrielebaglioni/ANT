@@ -1,17 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ShipmentStateReadModel } from "@ant/shared";
+import type { ShipmentIssueHistory, ShipmentStateReadModel, VerifyResponse } from "@ant/shared";
 import { AttachmentUploader } from "../../components/AttachmentUploader";
+import { QRCodeView } from "../../components/QRCodeView";
 import {
   confirmShipmentScan,
   getShipmentState,
+  getShipmentIssueHistory,
   reportShipmentIssue,
   resolveShipmentScan,
 } from "../../api/shipments";
+import { getVerifyShipment } from "../../api/verify";
 import { useShipmentStore } from "../../store/shipmentStore";
 import { formatDateTime, nowIso } from "../../utils/time";
 import { getErrorMessage } from "../../utils/errors";
 import { parseShipmentQr } from "../../epcis/qr";
 import type { WorkspacePersona } from "../../store/shipmentStore";
+import { actorLabelFromDid } from "../../utils/actorLabels";
 
 function getStateGuidance(state: ShipmentStateReadModel) {
   if (state.operationsBlocked) {
@@ -290,6 +294,71 @@ function getCustodyIssuePresets(persona: WorkspacePersona): ScanIssuePreset[] {
   ];
 }
 
+function buildFinalReceiverLabelPayload(data: VerifyResponse, issueHistory: ShipmentIssueHistory): string {
+  const conditions = (data.shipment.conditions ?? {}) as Record<string, unknown>;
+  const routePlan = Array.isArray(conditions.routePlan) ? conditions.routePlan : [];
+  const timelineSummary = data.events.map((event) => {
+    const payload = (event.payload ?? {}) as Record<string, unknown>;
+    const extensions = (payload.extensions ?? {}) as Record<string, unknown>;
+    const ant = (extensions.ant ?? {}) as Record<string, unknown>;
+    return {
+      t: event.eventTime,
+      h: typeof ant.handover === "string" ? ant.handover : null,
+      f: ant.finalDelivery === true ? 1 : 0,
+      a: actorLabelFromDid(typeof ant.actorDid === "string" ? ant.actorDid : null),
+      n: actorLabelFromDid(typeof ant.nextActorDid === "string" ? ant.nextActorDid : null),
+      p: event.proof?.status ?? null,
+    };
+  });
+
+  return JSON.stringify({
+    schema: "ANT_FINAL_LABEL_V1",
+    generatedAt: new Date().toISOString(),
+    shipment: {
+      code: data.shipment.shipmentCode,
+      status: data.shipment.status,
+      trackingUnitType: data.shipment.trackingUnitType ?? null,
+      trackingId: data.shipment.trackingId ?? null,
+      lotNumber: data.shipment.lotNumber ?? null,
+      epcClass: data.shipment.epcClass ?? null,
+      origin: data.shipment.origin ?? null,
+      destination: data.shipment.destination ?? null,
+    },
+    policy: {
+      slaHours: data.shipment.slaHours ?? null,
+      maxDelayHours: data.shipment.maxDelayHours ?? null,
+      sealRequired: Boolean(conditions.sealRequired),
+      tempMin: typeof conditions.tempMin === "number" ? Number(conditions.tempMin) : null,
+      tempMax: typeof conditions.tempMax === "number" ? Number(conditions.tempMax) : null,
+    },
+    route: routePlan.map((step) => {
+      const s = step as Record<string, unknown>;
+      return {
+        t: typeof s.stepType === "string" ? s.stepType : "CUSTOM",
+        l: typeof s.label === "string" ? s.label : undefined,
+        a: actorLabelFromDid(typeof s.actorDid === "string" ? s.actorDid : null),
+        h: typeof s.maxStepHours === "number" ? Number(s.maxStepHours) : undefined,
+      };
+    }),
+    verification: data.verificationSummary,
+    journey: timelineSummary,
+    issues: issueHistory.map((issue) => ({
+      id: issue.issueId,
+      t: issue.createdAt,
+      s: issue.severity,
+      d: issue.damaged,
+      n: issue.notifyNextActor,
+      title: issue.title,
+      desc: issue.description ?? undefined,
+      attachments: issue.attachments.map((a) => ({
+        h: a.sha256,
+        n: a.sourceFileName ?? undefined,
+        u: a.downloadUrl ?? undefined,
+      })),
+    })),
+  });
+}
+
 export function ScanSignPage() {
   const activeShipmentCode = useShipmentStore((s) => s.activeShipmentCode);
   const sharedShipmentCodeInput = useShipmentStore((s) => s.sharedShipmentCodeInput);
@@ -350,6 +419,10 @@ export function ScanSignPage() {
   );
   const [issueDamaged, setIssueDamaged] = useState(false);
   const [issueNotifyNextActor, setIssueNotifyNextActor] = useState(false);
+  const [finalVerifyData, setFinalVerifyData] = useState<VerifyResponse | null>(null);
+  const [finalIssueHistory, setFinalIssueHistory] = useState<ShipmentIssueHistory>([]);
+  const [finalArtifactsBusy, setFinalArtifactsBusy] = useState(false);
+  const [finalArtifactsError, setFinalArtifactsError] = useState("");
   const actorDidForScan = workspaceSession.actorDid || scanOperatorContext.actorDid;
 
   useEffect(() => {
@@ -579,6 +652,103 @@ export function ScanSignPage() {
   const showPickupCompletedNotice =
     Boolean(success) &&
     (hideScanConfirmBecausePickupCompleted || hideScanConfirmBecauseAlreadySubmitted);
+  const finalReceiverQrPayload = useMemo(
+    () =>
+      finalVerifyData && finalVerifyData.events.length > 0
+        ? buildFinalReceiverLabelPayload(finalVerifyData, finalIssueHistory)
+        : "",
+    [finalVerifyData, finalIssueHistory],
+  );
+  const latestFinalReceiverVerifyEvent =
+    finalVerifyData?.events?.[finalVerifyData.events.length - 1] ?? null;
+  const finalReceiverNotarizationReady = Boolean(state?.lastProof?.notarizationObjectId);
+  const finalReceiverDeliveredReady = state?.status === "DELIVERED";
+  const finalReceiverVerifyFinalized =
+    latestFinalReceiverVerifyEvent?.processingStage === "FINALIZED";
+  const finalReceiverArtifactsReady =
+    Boolean(finalVerifyData) &&
+    Boolean(finalReceiverQrPayload) &&
+    finalReceiverVerifyFinalized;
+  const finalReceiverMockBypassActive =
+    !finalReceiverDeliveredReady &&
+    finalReceiverNotarizationReady &&
+    finalReceiverArtifactsReady &&
+    showFinalReceiverTerminalExperience;
+  const finalReceiverClosureReady = finalReceiverDeliveredReady || finalReceiverMockBypassActive;
+  // UX rule (final receiver): as soon as the final QR payload is ready, show it.
+  // We keep closure/notarization indicators for transparency, but we don't block the UI
+  // on delayed/mock Move finalization in development.
+  const finalReceiverAllDone = showFinalReceiverTerminalExperience && finalReceiverArtifactsReady;
+  const [finalArtifactsPollTick, setFinalArtifactsPollTick] = useState(0);
+  const [finalizationDotFrame, setFinalizationDotFrame] = useState(0);
+  const finalizationDots = ".".repeat((finalizationDotFrame % 3) + 1);
+
+  useEffect(() => {
+    if (!showFinalReceiverTerminalExperience || !state?.shipmentCode) {
+      setFinalVerifyData(null);
+      setFinalIssueHistory([]);
+      setFinalArtifactsError("");
+      setFinalArtifactsBusy(false);
+      return;
+    }
+    let cancelled = false;
+    setFinalArtifactsBusy(true);
+    setFinalArtifactsError("");
+    Promise.all([
+      getVerifyShipment(state.shipmentCode),
+      getShipmentIssueHistory(state.shipmentCode),
+    ])
+      .then(([verifyData, issues]) => {
+        if (cancelled) return;
+        setFinalVerifyData(verifyData);
+        setFinalIssueHistory(issues);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setFinalArtifactsError(getErrorMessage(e));
+        setFinalVerifyData(null);
+        setFinalIssueHistory([]);
+      })
+      .finally(() => {
+        if (!cancelled) setFinalArtifactsBusy(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    showFinalReceiverTerminalExperience,
+    state?.shipmentCode,
+    state?.status,
+    state?.lastProof?.notarizationObjectId,
+    state?.lastProof?.anchoredAt,
+    finalArtifactsPollTick,
+  ]);
+
+  useEffect(() => {
+    if (!showFinalReceiverTerminalExperience || !state?.shipmentCode || finalReceiverAllDone) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setFinalArtifactsPollTick((n) => n + 1);
+      void loadState(state.shipmentCode, { preserveSuccess: true, keepPickupLock: true });
+    }, 1500);
+    return () => window.clearTimeout(timer);
+    // loadState is intentionally not included to avoid resetting the timer on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    showFinalReceiverTerminalExperience,
+    state?.shipmentCode,
+    finalReceiverAllDone,
+    finalArtifactsPollTick,
+  ]);
+
+  useEffect(() => {
+    if (!showFinalReceiverTerminalExperience || finalReceiverAllDone) return;
+    const timer = window.setInterval(() => {
+      setFinalizationDotFrame((n) => (n + 1) % 3);
+    }, 450);
+    return () => window.clearInterval(timer);
+  }, [showFinalReceiverTerminalExperience, finalReceiverAllDone]);
 
   return (
     <div className="panel-grid two">
@@ -688,50 +858,144 @@ export function ScanSignPage() {
           {state && (
             showFinalReceiverTerminalExperience ? (
               <div className="form-grid">
-                <div className="status-panel ok">
-                  <strong>
-                    {state.status === "DELIVERED"
-                      ? "Prodotto arrivato con successo al final receiver"
-                      : "Consegna finale registrata"}
-                  </strong>
-                  <p>
-                    {state.status === "DELIVERED"
-                      ? "La shipment è chiusa. Ora ti serve solo il QR finale con la history del prodotto e la documentazione di filiera."
-                      : "Hai confermato la presa in carico finale. ANT sta finalizzando notarization e chiusura della shipment."}
-                  </p>
-                  <p className="field-hint" style={{ margin: 0 }}>
-                    Prossimo step: apri la tab <strong>Verify</strong> per scaricare il QR finale,
-                    stampare l&apos;etichetta e consultare timeline/foto/evidenze.
-                  </p>
-                </div>
+                {!finalReceiverAllDone ? (
+                  <>
+                    <div className="status-panel ok" aria-live="polite">
+                      <strong>Consegna finale registrata</strong>
+                      <p>
+                        Hai confermato la presa in carico finale. ANT sta finalizzando la shipment e
+                        preparando il QR finale{finalizationDots}
+                      </p>
+                      <p className="field-hint" style={{ margin: 0 }}>
+                        Attendi qui: il pannello si aggiorna automaticamente e mostrerà il QR appena è
+                        pronto, senza ricaricare la pagina.
+                      </p>
+                    </div>
 
-                <div className="form-grid two">
-                  <div>
-                    <strong>Shipment</strong>
-                    <p style={{ margin: "4px 0 0" }}>
-                      <span className="code-pill">{state.shipmentCode}</span>
-                    </p>
-                  </div>
-                  <div>
-                    <strong>Stato</strong>
-                    <p style={{ margin: "4px 0 0" }}>{state.status}</p>
-                  </div>
-                  <div>
-                    <strong>Custode finale</strong>
-                    <p style={{ margin: "4px 0 0" }}>{state.currentCustodianDid ?? "—"}</p>
-                  </div>
-                  <div>
-                    <strong>Proof</strong>
-                    <p style={{ margin: "4px 0 0" }}>
-                      {state.lastProof?.notarizationObjectId ? "Notarization OK" : "In finalizzazione..."}
-                    </p>
-                  </div>
-                </div>
+                    <div className="status-panel muted" aria-live="polite">
+                      <strong>
+                        Preparazione QR finale in corso{finalizationDots}
+                      </strong>
+                      <p>
+                        Shipment <span className="code-pill">{state.shipmentCode}</span> • Final
+                        receiver <code>{actorDidForScan || "—"}</code>
+                      </p>
+                      <div
+                        aria-hidden="true"
+                        style={{
+                          height: 10,
+                          borderRadius: 999,
+                          background: "rgba(148, 163, 184, 0.25)",
+                          overflow: "hidden",
+                          marginTop: 8,
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: "45%",
+                            height: "100%",
+                            borderRadius: 999,
+                            background:
+                              "linear-gradient(90deg, rgba(245,158,11,0.7), rgba(234,179,8,1))",
+                            animation: "ant-finalizing-pulse 1.2s ease-in-out infinite",
+                          }}
+                        />
+                      </div>
+                    </div>
 
-                <p className="field-hint" style={{ marginTop: 2 }}>
-                  Il codice shipment resta condiviso tra tab: vai su <strong>Verify</strong> per scaricare il QR finale,
-                  stampare l&apos;etichetta e consultare timeline/foto/evidenze.
-                </p>
+                    {finalArtifactsError && <p className="error">{finalArtifactsError}</p>}
+                    {finalArtifactsBusy && (
+                      <p className="muted">
+                        ANT sta preparando il QR finale con history, evidenze e verifiche
+                        {finalizationDots}
+                      </p>
+                    )}
+
+                    <p className="field-hint" style={{ marginTop: 2 }}>
+                      Il codice shipment resta condiviso tra tab. ANT aggiorna automaticamente questo
+                      pannello finché il QR finale non è pronto.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <div className="status-panel ok">
+                      <strong>Prodotto arrivato con successo al final receiver</strong>
+                      <p>
+                        {finalReceiverMockBypassActive
+                          ? "Modalità development: la presa in carico finale è confermata e il QR finale è pronto. La chiusura Move/DB è in sincronizzazione mock."
+                          : "La shipment è chiusa. Qui sotto trovi il QR finale con history del prodotto, evidenze e documentazione di filiera."}
+                      </p>
+                      <p className="field-hint" style={{ margin: 0 }}>
+                        Il QR finale e la stampa etichetta sono disponibili qui sotto. La tab{" "}
+                        <strong>Verify</strong> resta disponibile per i dettagli tecnici completi.
+                      </p>
+                    </div>
+
+                    <div className="form-grid two">
+                      <div>
+                        <strong>Shipment</strong>
+                        <p style={{ margin: "4px 0 0" }}>
+                          <span className="code-pill">{state.shipmentCode}</span>
+                        </p>
+                      </div>
+                      <div>
+                        <strong>Stato</strong>
+                        <p style={{ margin: "4px 0 0" }}>
+                          {finalReceiverMockBypassActive ? "DELIVERED (mock)" : state.status}
+                        </p>
+                      </div>
+                      <div>
+                        <strong>Custode finale</strong>
+                        <p style={{ margin: "4px 0 0" }}>
+                          {state.currentCustodianDid ?? actorDidForScan ?? "—"}
+                        </p>
+                      </div>
+                      <div>
+                        <strong>Proof</strong>
+                        <p style={{ margin: "4px 0 0" }}>
+                          {finalReceiverNotarizationReady ? "Notarization OK" : "In finalizzazione..."}
+                        </p>
+                      </div>
+                    </div>
+
+                    <QRCodeView
+                      value={finalReceiverQrPayload}
+                      title={state.shipmentCode}
+                      subtitle="QR finale (history + policy + verify + issue/evidenze)"
+                      downloadFileName={`final-label-${state.shipmentCode}`}
+                      payloadHint="QR finale (dev) con percorso della shipment, condizioni, verifica proof e issue/evidenze. Puoi visualizzarlo qui e stamparlo come etichetta."
+                      minimal
+                    />
+                    <div className="actions" style={{ marginTop: -4 }}>
+                      <button type="button" className="btn" onClick={() => window.print()}>
+                        Stampa etichetta (pagina)
+                      </button>
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={busy}
+                        onClick={() => {
+                          setSharedShipmentCodeInput(state.shipmentCode);
+                          syncShipmentCodeEverywhere(state.shipmentCode);
+                        }}
+                      >
+                        Apri dettagli in Verify
+                      </button>
+                    </div>
+
+                    <p className="field-hint" style={{ marginTop: 2 }}>
+                      {finalReceiverMockBypassActive ? (
+                        <>
+                          QR finale disponibile in modalità development anche se la chiusura Move è
+                          simulata. In produzione comparirà solo dopo chiusura completa on-chain.
+                          <br />
+                        </>
+                      ) : null}
+                      Il codice shipment resta condiviso tra tab. Se vuoi approfondire le singole prove
+                      e i payload EPCIS, apri <strong>Verify</strong>.
+                    </p>
+                  </>
+                )}
               </div>
             ) : (
             <div className="form-grid">

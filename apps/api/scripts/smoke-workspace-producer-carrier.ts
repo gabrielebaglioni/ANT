@@ -36,9 +36,12 @@ const supervisor = {
   rolesCsv: "supervisor,auditor",
 };
 
+const receiverParticipantDid =
+  process.env.ANT_SMOKE_RECEIVER_PARTICIPANT_DID ?? "did:iota:receiver-demo";
+
 const receiver = {
-  actorDid: "did:iota:receiver-demo",
-  subject: "dev-receiver-operator",
+  actorDid: process.env.ANT_SMOKE_FINAL_RECEIVER_DID ?? receiverParticipantDid,
+  subject: process.env.ANT_SMOKE_FINAL_RECEIVER_SUB ?? "dev-final-receiver-operator",
   rolesCsv: "operator",
 };
 
@@ -194,7 +197,7 @@ async function main() {
     participants: {
       producerDid: producer.actorDid,
       carrierDid: carrier.actorDid,
-      receiverDid: receiver.actorDid,
+      receiverDid: receiverParticipantDid,
     },
   };
 

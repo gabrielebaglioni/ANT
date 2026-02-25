@@ -10,6 +10,23 @@ import { AppError } from "../../lib/errors";
 import { PgStoreService } from "../../store/pg-store.service";
 import { IotaGateway } from "../iota/iota.gateway";
 
+function isRoutePlanFinalReceiverActor(
+  conditions: Record<string, unknown> | null | undefined,
+  actorDid: string | undefined,
+): boolean {
+  if (!actorDid) return false;
+  const routePlan = Array.isArray(conditions?.routePlan) ? conditions.routePlan : [];
+  return routePlan.some((step) => {
+    if (!step || typeof step !== "object") return false;
+    const row = step as Record<string, unknown>;
+    return (
+      String(row.stepType ?? "").toUpperCase() === "FINAL_RECEIVER" &&
+      typeof row.actorDid === "string" &&
+      row.actorDid === actorDid
+    );
+  });
+}
+
 @Injectable()
 export class OutboxWorker {
   private readonly logger = new Logger(OutboxWorker.name);
@@ -229,7 +246,8 @@ export class OutboxWorker {
 
     if (handover === "IN") {
       const isFinalReceiverTakeover =
-        Boolean(actorDid) && actorDid === shipment.receiverDid;
+        (Boolean(actorDid) && actorDid === shipment.receiverDid) ||
+        isRoutePlanFinalReceiverActor(shipment.conditions, actorDid);
       const tx = isFinalReceiverTakeover
         ? await this.iotaGateway.handoverInFinalDelivery({
             moveObjectId: shipment.moveObjectId ?? "",

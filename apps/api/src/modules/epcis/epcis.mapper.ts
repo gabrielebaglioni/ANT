@@ -46,6 +46,21 @@ function commonExtensions(
   };
 }
 
+function isRoutePlanFinalReceiverActor(shipment: ShipmentRecord, actorDid: string): boolean {
+  const routePlan = Array.isArray(shipment.conditions?.routePlan)
+    ? shipment.conditions?.routePlan
+    : [];
+  return routePlan.some((step) => {
+    if (!step || typeof step !== "object") return false;
+    const row = step as Record<string, unknown>;
+    return (
+      String(row.stepType ?? "").toUpperCase() === "FINAL_RECEIVER" &&
+      typeof row.actorDid === "string" &&
+      row.actorDid === actorDid
+    );
+  });
+}
+
 export function buildHandoverOutEvent(
   shipment: ShipmentRecord,
   request: HandoverRequest,
@@ -88,7 +103,9 @@ export function buildHandoverInEvent(
   confirmsOutEventId?: string,
 ): ObjectEvent {
   const what = buildWhat(shipment);
-  const isFinalDelivery = request.who.actorDid === shipment.receiverDid;
+  const isFinalDelivery =
+    request.who.actorDid === shipment.receiverDid ||
+    isRoutePlanFinalReceiverActor(shipment, request.who.actorDid);
   return {
     type: "ObjectEvent",
     eventTime: request.when,

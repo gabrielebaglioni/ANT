@@ -8,6 +8,7 @@ interface QRCodeViewProps {
   subtitle?: string;
   downloadFileName?: string;
   payloadHint?: string;
+  minimal?: boolean;
 }
 
 export function QRCodeView({
@@ -16,10 +17,11 @@ export function QRCodeView({
   subtitle,
   downloadFileName,
   payloadHint,
+  minimal = false,
 }: QRCodeViewProps) {
   const [dataUrl, setDataUrl] = useState<string>("");
   const [error, setError] = useState<string>("");
-  const shipmentCode = parseShipmentQr(value) ?? value;
+  const shipmentCode = resolveQrDisplayCode(value);
   const qrDetails = parseShipmentQrDetails(value);
 
   useEffect(() => {
@@ -112,23 +114,27 @@ export function QRCodeView({
 
   return (
     <div className="card">
-      <h3>{title ? `QR Code • ${title}` : "QR Code"}</h3>
-      {subtitle && <p className="field-hint" style={{ marginTop: -4 }}>{subtitle}</p>}
-      <p>
-        Shipment code: <span className="code-pill">{shipmentCode}</span>
-      </p>
-      <p className="muted">
-        Payload encoded: {value}
-        <br />
-        {payloadHint ??
-          "Contiene solo riferimento spedizione (no dati sensibili), versione schema QR e checksum anti-errore di scansione/incolla."}
-      </p>
-      {qrDetails && (
-        <p className="field-hint">
-          QR version: <strong>{qrDetails.version ?? "legacy"}</strong> • checksum:{" "}
-          <strong>{qrDetails.checksum ?? "—"}</strong>
-          {qrDetails.checksumValid === false ? " (checksum mismatch)" : ""}
-        </p>
+      {!minimal && (
+        <>
+          <h3>{title ? `QR Code • ${title}` : "QR Code"}</h3>
+          {subtitle && <p className="field-hint" style={{ marginTop: -4 }}>{subtitle}</p>}
+          <p>
+            Shipment code: <span className="code-pill">{shipmentCode}</span>
+          </p>
+          <p className="muted">
+            Payload encoded: {value}
+            <br />
+            {payloadHint ??
+              "Contiene solo riferimento spedizione (no dati sensibili), versione schema QR e checksum anti-errore di scansione/incolla."}
+          </p>
+          {qrDetails && (
+            <p className="field-hint">
+              QR version: <strong>{qrDetails.version ?? "legacy"}</strong> • checksum:{" "}
+              <strong>{qrDetails.checksum ?? "—"}</strong>
+              {qrDetails.checksumValid === false ? " (checksum mismatch)" : ""}
+            </p>
+          )}
+        </>
       )}
       {error && <p className="error">{error}</p>}
       {dataUrl ? (
@@ -140,17 +146,34 @@ export function QRCodeView({
             height={260}
             style={{ imageRendering: "pixelated", background: "#fff", borderRadius: 12 }}
           />
-          <div className="actions" style={{ marginTop: 10 }}>
-            <button type="button" className="btn" onClick={handleDownload}>
-              Download PNG (titolo + QR)
-            </button>
-          </div>
+          {!minimal && (
+            <div className="actions" style={{ marginTop: 10 }}>
+              <button type="button" className="btn" onClick={handleDownload}>
+                Download PNG (titolo + QR)
+              </button>
+            </div>
+          )}
         </>
       ) : (
         <p className="muted">Generating QR...</p>
       )}
     </div>
   );
+}
+
+function resolveQrDisplayCode(value: string): string {
+  const shipmentCode = parseShipmentQr(value);
+  if (shipmentCode) return shipmentCode;
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    const shipment = (parsed.shipment ?? {}) as Record<string, unknown>;
+    if (typeof shipment.code === "string" && shipment.code.trim()) {
+      return shipment.code;
+    }
+  } catch {
+    // ignore non-JSON payloads
+  }
+  return value;
 }
 
 function loadImage(src: string): Promise<HTMLImageElement> {
