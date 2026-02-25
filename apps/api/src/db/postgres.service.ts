@@ -25,7 +25,9 @@ export class PostgresService implements OnModuleDestroy {
       password: env.PGPASSWORD,
       database: env.PGDATABASE,
       max: env.PGPOOL_MAX ? Number(env.PGPOOL_MAX) : 10,
-      ssl: env.PGSSL === "1" || env.PGSSL === "true" ? { rejectUnauthorized: false } : undefined,
+      // Secure-by-default TLS when PGSSL is enabled. For self-signed certs in non-prod,
+      // provide a trusted CA instead of disabling verification.
+      ssl: env.PGSSL === "1" || env.PGSSL === "true" ? { rejectUnauthorized: true } : undefined,
     };
 
     this.pool = new Pool(config);

@@ -18,7 +18,7 @@ function createPool() {
     database: process.env.PGDATABASE,
     ssl:
       process.env.PGSSL === "true" || process.env.PGSSL === "1"
-        ? { rejectUnauthorized: false }
+        ? { rejectUnauthorized: true }
         : undefined,
   });
 }
