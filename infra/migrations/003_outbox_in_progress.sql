@@ -1,0 +1,11 @@
+BEGIN;
+
+DO $$
+BEGIN
+  ALTER TYPE outbox_status ADD VALUE IF NOT EXISTS 'IN_PROGRESS';
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
+
+COMMIT;
+
